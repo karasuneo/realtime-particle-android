@@ -9,6 +9,8 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -25,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.DefaultPathName
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.core.content.ContextCompat
@@ -45,15 +48,24 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     lateinit var accDataArray: Array<MutableState<String>>
     lateinit var gyroDataArray: Array<MutableState<String>>
+    private val accSensorDataList = mutableListOf<String>()
+    private val gyroSensorDataList = mutableListOf<String>()
 
-    private val sensorDataList = mutableListOf<String>()
+    var firstTime: Long? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private val sendCSVRunnable = object : Runnable {
+        override fun run() {
+            sendCSVToServer()
+            handler.postDelayed(this, 1000) // 1秒後に再度実行
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             accDataArray = Array(3) {
-                 remember {
+                remember {
                     mutableStateOf("準備中")
                 }
             }
@@ -66,6 +78,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 SensorView()
             }
         }
+
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
         gyroSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
@@ -98,35 +111,44 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onResume() {
         super.onResume()
-        sensorManager.registerListener(this, accSensor, SensorManager.SENSOR_DELAY_UI)
-        sensorManager.registerListener(this, gyroSensor, SensorManager.SENSOR_DELAY_UI)
+        sensorManager.registerListener(this, accSensor, SensorManager.SENSOR_DELAY_GAME)
+        sensorManager.registerListener(this, gyroSensor, SensorManager.SENSOR_DELAY_GAME)
+        handler.post(sendCSVRunnable) // CSVファイルの送信を開始
     }
 
     override fun onPause() {
         super.onPause()
         sensorManager.unregisterListener(this)
-        saveDataToCSV()
-        sendCSVToServer()
+        handler.removeCallbacks(sendCSVRunnable) // CSVファイルの送信を停止
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
-        if (event != null) {
+        if (event != null && ::gyroDataArray.isInitialized && ::accDataArray.isInitialized) {
+            if (firstTime==null){
+                Log.d("timeset","comp")
+                firstTime=System.currentTimeMillis()
+                Log.d("timeset","${firstTime}")
+            }
             when (event.sensor.type) {
                 Sensor.TYPE_LINEAR_ACCELERATION -> {
                     accDataArray[0].value = "x軸${event.values[0]}"
                     accDataArray[1].value = "y軸${event.values[1]}"
                     accDataArray[2].value = "z軸${event.values[2]}"
-                    sensorDataList.add("${event.values[0]},${event.values[1]},${event.values[2]}")
+                    val elapsedtime=System.currentTimeMillis()- firstTime!!
+
+                    accSensorDataList.add("${elapsedtime},${event.values[0]},${event.values[1]},${event.values[2]}")
                 }
                 Sensor.TYPE_GYROSCOPE -> {
                     gyroDataArray[0].value = "x軸${event.values[0]}"
                     gyroDataArray[1].value = "y軸${event.values[1]}"
                     gyroDataArray[2].value = "z軸${event.values[2]}"
-                    val lastIndex = sensorDataList.size - 1
-                    if (lastIndex >= 0) {
-                        val lastEntry = sensorDataList[lastIndex]
-                        sensorDataList[lastIndex] = "$lastEntry,${event.values[0]},${event.values[1]},${event.values[2]}"
-                    }
+                    val elapsedtime=System.currentTimeMillis()- firstTime!!
+                    gyroSensorDataList.add("${elapsedtime},${event.values[0]},${event.values[1]},${event.values[2]}")
+//                    val lastIndex = sensorDataList.size - 1
+//                    if (lastIndex >= 0) {
+//                        val lastEntry = sensorDataList[lastIndex]
+//                        sensorDataList[lastIndex] = "$lastEntry,${event.values[0]},${event.values[1]},${event.values[2]}"
+//                    }
                 }
             }
         }
@@ -134,12 +156,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    private fun saveDataToCSV() {
-        val file = File(getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "sensor_data.csv")
+    private fun saveDataToCSV(fileName:String,sensorDataList:List<String>) {
+        val file = File(getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "${fileName}.csv")
 
         try {
             FileWriter(file).use { writer ->
-                writer.append("acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z\n")
+//                writer.append("t,acc_x,acc_y,acc_z,x,y,z\n")
+                writer.append("t,x,y,z\n")
                 sensorDataList.forEach { data ->
                     writer.append("$data\n")
                 }
@@ -151,6 +174,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     private fun sendCSVToServer() {
+        saveDataToCSV("sensor_data",gyroSensorDataList) // 現在のデータをCSVに保存
+        saveDataToCSV("acc_sensor_data",accSensorDataList) // 現在のデータをCSVに保存
+
         val file = File(getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "sensor_data.csv")
         if (!file.exists()) {
             Log.e("CSV", "File not found")
@@ -162,11 +188,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         val fileBody = RequestBody.create(mediaType, file)
         val requestBody = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
-            .addFormDataPart("file", file.name, fileBody)
+            .addFormDataPart("rawDataFile", file.name, fileBody)
             .build()
 
         val request = Request.Builder()
-            .url("https://your_api_endpoint.com/upload")  // サーバのURLに置き換えてください
+            .url("${BuildConfig.DOMAIN}/api/walk")  // サーバのURLに置き換えてください
             .post(requestBody)
             .build()
 
@@ -178,6 +204,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 if (response.isSuccessful) {
                     Log.d("HTTP", "CSV successfully sent")
+                    // 送信成功後、センサーデータリストをクリア
+                    gyroSensorDataList.clear()
+                    //accSensorDataList.clear()
+                    // 送信後、CSVファイルを削除
+                    file.delete()
                 } else {
                     Log.e("HTTP", "Failed to send CSV, response code: ${response.code}")
                 }
