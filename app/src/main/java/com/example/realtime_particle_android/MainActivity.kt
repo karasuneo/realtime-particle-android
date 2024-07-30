@@ -18,8 +18,10 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts.RequestPermission
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
@@ -27,16 +29,20 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.DefaultPathName
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.example.realtime_particle_android.model.FinishWalkingData
+import com.example.realtime_particle_android.model.StartWalkingData
 import com.example.realtime_particle_android.ui.theme.RealtimeparticleandroidTheme
+import com.google.gson.Gson
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.io.FileWriter
 import java.io.IOException
@@ -60,6 +66,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
     }
 
+    private var isSensing = mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -75,7 +83,24 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 }
             }
             RealtimeparticleandroidTheme {
-                SensorView()
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    RealtimeparticleandroidTheme {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            StartWalkingButton()
+                            SensorView()
+
+                        }
+                    }
+
+                }
             }
         }
 
@@ -111,15 +136,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onResume() {
         super.onResume()
-        sensorManager.registerListener(this, accSensor, SensorManager.SENSOR_DELAY_GAME)
-        sensorManager.registerListener(this, gyroSensor, SensorManager.SENSOR_DELAY_GAME)
-        handler.post(sendCSVRunnable) // CSVファイルの送信を開始
     }
 
     override fun onPause() {
         super.onPause()
-        sensorManager.unregisterListener(this)
-        handler.removeCallbacks(sendCSVRunnable) // CSVファイルの送信を停止
+        stopSensing()
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
@@ -144,11 +165,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     gyroDataArray[2].value = "z軸${event.values[2]}"
                     val elapsedtime=System.currentTimeMillis()- firstTime!!
                     gyroSensorDataList.add("${elapsedtime},${event.values[0]},${event.values[1]},${event.values[2]}")
-//                    val lastIndex = sensorDataList.size - 1
-//                    if (lastIndex >= 0) {
-//                        val lastEntry = sensorDataList[lastIndex]
-//                        sensorDataList[lastIndex] = "$lastEntry,${event.values[0]},${event.values[1]},${event.values[2]}"
-//                    }
                 }
             }
         }
@@ -161,7 +177,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
         try {
             FileWriter(file).use { writer ->
-//                writer.append("t,acc_x,acc_y,acc_z,x,y,z\n")
                 writer.append("t,x,y,z\n")
                 sensorDataList.forEach { data ->
                     writer.append("$data\n")
@@ -185,14 +200,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
         val client = OkHttpClient()
         val mediaType = "text/csv".toMediaTypeOrNull()
-        val fileBody = RequestBody.create(mediaType, file)
+        val fileBody = file.asRequestBody(mediaType)
         val requestBody = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
-            .addFormDataPart("rawDataFile", file.name, fileBody)
+            .addFormDataPart("uploadFile", file.name, fileBody)
+            .addFormDataPart("bucketName", "android")
             .build()
 
         val request = Request.Builder()
-            .url("${BuildConfig.DOMAIN}/api/walk")  // サーバのURLに置き換えてください
+            .url("${BuildConfig.DOMAIN}/api/health/minio/csv")  // サーバのURLに置き換えてください
             .post(requestBody)
             .build()
 
@@ -216,6 +232,83 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         })
     }
 
+    private fun sendStartWalkingToServer() {
+        val client = OkHttpClient()
+
+        val requestBodyData = StartWalkingData(
+            pedestrianId = "examplePedestrianId",
+            floorMapId = "exampleFloorMapId"
+        )
+        val gson = Gson()
+        val json = gson.toJson(requestBodyData)
+        val requestBody = json.toRequestBody("application/json; charset=utf-8".toMediaType())
+
+        val request = Request.Builder()
+            .url("${BuildConfig.DOMAIN}/api/walking/start")  // サーバのURLに置き換えてください
+            .post(requestBody)
+            .build()
+
+        client.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: IOException) {
+                Log.e("HTTP", "Failed to send CSV", e)
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                if (response.isSuccessful) {
+                    Log.d("HTTP", "CSV successfully sent")
+                } else {
+                    Log.e("HTTP", "Failed to send CSV, response code: ${response.code}")
+                }
+            }
+        })
+    }
+
+
+    private fun sendFinishWalkingToServer() {
+        val client = OkHttpClient()
+
+        val requestBodyData = FinishWalkingData(
+            trajectoryId = ""
+        )
+        val gson = Gson()
+        val json = gson.toJson(requestBodyData)
+        val requestBody = json.toRequestBody("application/json; charset=utf-8".toMediaType())
+
+        val request = Request.Builder()
+            .url("${BuildConfig.DOMAIN}/api/walking/finish")  // サーバのURLに置き換えてください
+            .post(requestBody)
+            .build()
+
+        client.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: IOException) {
+                Log.e("HTTP", "Failed to send CSV", e)
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                if (response.isSuccessful) {
+                    Log.d("HTTP", "CSV successfully sent")
+                } else {
+                    Log.e("HTTP", "Failed to send CSV, response code: ${response.code}")
+                }
+            }
+        })
+    }
+
+
+    private fun startSensing() {
+        sensorManager.registerListener(this, accSensor, SensorManager.SENSOR_DELAY_GAME)
+        sensorManager.registerListener(this, gyroSensor, SensorManager.SENSOR_DELAY_GAME)
+        sendStartWalkingToServer()
+        handler.post(sendCSVRunnable) // CSVファイルの送信を開始
+        isSensing.value = true
+    }
+
+    private fun stopSensing() {
+        sensorManager.unregisterListener(this)
+        handler.removeCallbacks(sendCSVRunnable) // CSVファイルの送信を停止
+        isSensing.value = false
+    }
+
     @Composable
     fun SensorView() {
         val sensorModifier = Modifier.fillMaxWidth(0.6f)
@@ -234,20 +327,25 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             Text(text = gyroDataArray[2].value, textAlign = TextAlign.Left, modifier = sensorModifier)
         }
     }
-}
 
-@Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-    Text(
-        text = "Hello $name!",
-        modifier = modifier
-    )
-}
-
-@Preview(showBackground = true)
-@Composable
-fun GreetingPreview() {
-    RealtimeparticleandroidTheme {
-        Greeting("Android")
+    @Composable
+    fun StartWalkingButton() {
+        Button(
+            onClick = {
+                if (isSensing.value) {
+                    stopSensing()
+                } else {
+                    startSensing()
+                }
+            },
+            contentPadding = PaddingValues(
+                start = 20.dp,
+                top = 40.dp,
+                end = 20.dp,
+                bottom = 40.dp
+            )
+        ) {
+            Text(text = if (isSensing.value) "停止" else "歩行開始")
+        }
     }
 }
